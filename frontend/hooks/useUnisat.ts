@@ -6,6 +6,7 @@ export function useUnisat() {
   const [isConnected, setIsConnected] = useState(false);
   const [network, setNetwork] = useState<string>("");
   const [isWalletReady, setIsWalletReady] = useState(false);
+  const [publicKey, setPublicKey] = useState<string>("");
 
   // Wait for UniSat wallet to be injected
   useEffect(() => {
@@ -52,7 +53,15 @@ export function useUnisat() {
       setAddress(currentAccount);
       setIsConnected(true);
 
-      // 2. Ensure we are on Testnet (Crucial for Hackathon)
+      // 2. Get public key
+      try {
+        const pubkey = await window.unisat.getPublicKey();
+        setPublicKey(pubkey);
+      } catch (pkError) {
+        console.warn("Could not retrieve public key:", pkError);
+      }
+
+      // 3. Ensure we are on Testnet (Crucial for Hackathon)
       const currentNetwork = await window.unisat.getNetwork();
       if (currentNetwork !== "testnet") {
         try {
@@ -78,6 +87,11 @@ export function useUnisat() {
           setAddress(accounts[0]);
           setIsConnected(true);
           window.unisat.getNetwork().then(setNetwork);
+          
+          // Also get public key
+          window.unisat.getPublicKey().then(setPublicKey).catch((err: any) => {
+            console.log("Could not auto-retrieve public key:", err);
+          });
         }
       }).catch((err) => {
         console.log("Auto-connect not available:", err);
@@ -90,6 +104,7 @@ export function useUnisat() {
     address,
     isConnected,
     network,
+    publicKey,
     isUnisatInstalled: isWalletReady,
   };
 }
