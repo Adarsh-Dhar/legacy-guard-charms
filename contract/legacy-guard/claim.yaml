@@ -1,0 +1,15 @@
+# Claim Spell
+# Heir claims the vault after the timeout period has elapsed
+
+version: 1
+
+inputs:
+  - utxo: ${vault_utxo}
+    charms:
+      - app: ${app_vk}
+        # Spending the vault UTXO after timeout
+
+outputs:
+  - address: ${heir_address}
+    value: ${vault_value}  # Funds go to heir's standard Bitcoin address
+    # No charms in output - the charm is "burned" and BTC goes to heir

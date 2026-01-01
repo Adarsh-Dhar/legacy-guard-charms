@@ -1,0 +1,19 @@
+# Pulse Spell
+# Owner sends a heartbeat to reset the timeout timer
+
+version: 1
+
+inputs:
+  - utxo: ${vault_utxo}
+    charms:
+      - app: ${app_vk}
+        # Spending the existing vault UTXO
+
+outputs:
+  - address: ${vault_address}
+    value: ${vault_value}  # Same value (minus fees)
+    charms:
+      - app: ${app_vk}
+        data:
+          action: Pulse
+          # State will be updated with new last_heartbeat
