@@ -204,6 +204,28 @@ export default function CreateVaultForm({ ownerPubkey, ownerAddress, onCreateVau
       }
 
       console.log("Vault created successfully:", vaultData)
+
+      // Store vault in database
+      try {
+        const saveResponse = await fetch("/api/vaults", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(vaultData),
+        })
+
+        if (!saveResponse.ok) {
+          const errorData = await saveResponse.json()
+          console.warn("Failed to save vault to database:", errorData)
+          // Don't fail the entire operation if DB save fails
+        } else {
+          const savedVault = await saveResponse.json()
+          console.log("Vault saved to database:", savedVault)
+        }
+      } catch (dbError) {
+        console.warn("Error saving vault to database:", dbError)
+        // Don't fail the entire operation if DB save fails
+      }
+
       setSuccess(true)
       onCreateVault(vaultData)
     } catch (err) {

@@ -1,0 +1,38 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Vault {
+  id                      String    @id @default(cuid())
+  txId                    String    @unique // Transaction ID that locked the funds
+  ownerAddress            String    // Bitcoin address of the vault creator
+  ownerPubkey             String    // Public key of the vault creator
+  nomineeAddress          String    // Bitcoin address of the heir (can claim after timeout)
+  lockedAmount            Float     // BTC amount locked in the vault
+  lockedAmountSatoshis    BigInt    // Same amount in satoshis
+  inactivityTimeout       String    // Timeout period (e.g., "1-year", "6-months")
+  inactivityTimeoutBlocks Int       // Number of blocks before heir can claim
+  appVerificationKey      String    // Verification key for the app
+  spell                   String    @db.Text // JSON spell template
+  timestamp               DateTime  @default(now())
+  createdAt               DateTime  @default(now())
+  updatedAt               DateTime  @updatedAt
+
+  // Claim tracking
+  claimedAt               DateTime? // When the heir claimed the vault
+  claimedTxId             String?   // Transaction ID of the claim
+
+  @@index([nomineeAddress]) // For quick lookups by heir address
+  @@index([ownerAddress])   // For quick lookups by owner address
+  @@index([createdAt])      // For sorting by creation date
+}
