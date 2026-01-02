@@ -99,6 +99,10 @@ export function generateDeploymentBundle(
 
   if (utxoId) {
     initSpell = generateInitializeSpell(config, utxoId, utxoIndex);
+  } else {
+    // Generate a template spell without specific UTXO for planning/display
+    // The actual spell will use the selected UTXO later
+    initSpell = generateInitializeSpellTemplate(config);
   }
 
   const envVars = generateDeploymentEnvObject(config);
@@ -109,8 +113,47 @@ export function generateDeploymentBundle(
     config,
     envVars,
     initSpell,
+    // Keep legacy key for callers expecting `spell`
+    spell: initSpell,
     report,
   };
+}
+
+/**
+ * Generate a template spell without a specific UTXO
+ */
+function generateInitializeSpellTemplate(config: VaultDeploymentConfig): string {
+  const ownerKey = formatPublicKey(config.ownerPubkey);
+  const heirKey = formatPublicKey(config.heirPubkey);
+  const satoshis = btcToSatoshis(config.amount);
+
+  const lines = [
+    "version: 1",
+    "",
+    "inputs:",
+    '  - utxo: "<UTXO_ID>:<UTXO_INDEX>"',
+    `    amount: ${satoshis}`,
+    "    charms:",
+    `      - app: "c78f9360ba4bc547be980aeb7c55e799184b8a6171d267cc53e1a427cdef7337"`,
+    "        data:",
+    "          action: Initialize",
+    `          owner_pubkey: "${ownerKey}"`,
+    `          heir_pubkey: "${heirKey}"`,
+    `          timeout_blocks: ${config.timeoutBlocks}`,
+    "",
+    "outputs:",
+    `  - address: "${config.heirAddress}"`,
+    `    value: ${satoshis}`,
+    "    charms:",
+    `      - app: "c78f9360ba4bc547be980aeb7c55e799184b8a6171d267cc53e1a427cdef7337"`,
+    "        data:",
+    "          action: Initialize",
+    `          owner_pubkey: "${ownerKey}"`,
+    `          heir_pubkey: "${heirKey}"`,
+    `          timeout_blocks: ${config.timeoutBlocks}`,
+  ];
+
+  return lines.join("\n");
 }
 
 /**

@@ -3,14 +3,16 @@
 import type React from "react"
 
 import { useState } from "react"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
-import { Button } from "@/components/ui/button"
-import { Input } from "@/components/ui/input"
-import { Label } from "@/components/ui/label"
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
-import { Lock } from "lucide-react"
 import { LEGACY_GUARD_CONFIG } from "@/lib/config"
 import { btcToSatoshis, formatPublicKey } from "@/lib/deployment"
+import { generateDeploymentBundle } from "@/lib/contract-integration"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card"
+import { Input } from "@/components/ui/input"
+import { Label } from "@/components/ui/label"
+import { Button } from "@/components/ui/button"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select"
+import { Alert, AlertDescription } from "@/components/ui/alert"
+import { Lock, AlertCircle, CheckCircle } from "lucide-react"
 
 interface CreateVaultFormProps {
   ownerPubkey?: string
@@ -18,42 +20,199 @@ interface CreateVaultFormProps {
   onCreateVault: (data: any) => void
 }
 
+async function derivePublicKeyFromAddress(address: string): Promise<string | null> {
+  try {
+    // Call our backend API to avoid CORS issues
+    const response = await fetch("/api/derive-pubkey", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ address }),
+    })
+
+    if (!response.ok) {
+      const error = await response.json()
+      throw new Error(error.error || "Failed to derive public key")
+    }
+
+    const data = await response.json()
+    return data.publicKey || null
+  } catch (error) {
+    console.error("Error deriving public key:", error)
+    throw error
+  }
+}
+
 export default function CreateVaultForm({ ownerPubkey, ownerAddress, onCreateVault }: CreateVaultFormProps) {
   const [loading, setLoading] = useState(false)
+  const [error, setError] = useState<string | null>(null)
+  const [success, setSuccess] = useState(false)
+  const [txId, setTxId] = useState<string | null>(null)
   const [formData, setFormData] = useState({
-    nomineeAddress: "",
     lockedAmount: "",
     inactivityTimeout: "",
-    nomineePubkey: "",
+    nomineeAddress: "",
   })
+  const [derivingPubkey, setDerivingPubkey] = useState(false)
+  const [derivedPubkey, setDerivedPubkey] = useState<string | null>(null)
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
+    setError(null)
+    setSuccess(false)
     setLoading(true)
 
-    // Simulate proof generation
-    await new Promise((resolve) => setTimeout(resolve, 2000))
+    try {
+      // Validate wallet connection
+      if (!window.unisat) {
+        throw new Error("UniSat wallet not found. Please install UniSat extension.")
+      }
 
-    setLoading(false)
-    
-    // Format the vault deployment data
-    const timeoutBlocks = LEGACY_GUARD_CONFIG.TIMEOUT_OPTIONS[
-      formData.inactivityTimeout as keyof typeof LEGACY_GUARD_CONFIG.TIMEOUT_OPTIONS
-    ] || 52_000
+      // Fetch owner's public key from wallet if not provided
+      let ownerPublicKey = ownerPubkey
+      if (!ownerPublicKey) {
+        console.log("Fetching owner public key from wallet...")
+        ownerPublicKey = await window.unisat.getPublicKey()
+        console.log("Raw public key from wallet:", ownerPublicKey, "length:", ownerPublicKey?.length)
+      }
 
-    const vaultData = {
-      nomineeAddress: formData.nomineeAddress,
-      lockedAmount: Number.parseFloat(formData.lockedAmount),
-      lockedAmountSatoshis: btcToSatoshis(Number.parseFloat(formData.lockedAmount)),
-      inactivityTimeout: formData.inactivityTimeout,
-      inactivityTimeoutBlocks: timeoutBlocks,
-      nomineePubkey: formatPublicKey(formData.nomineePubkey),
-      ownerAddress,
-      ownerPubkey: ownerPubkey ? formatPublicKey(ownerPubkey) : undefined,
-      appVerificationKey: LEGACY_GUARD_CONFIG.VERIFICATION_KEY,
+      if (!ownerPublicKey) {
+        throw new Error("Failed to get public key from wallet. Make sure UniSat is connected and unlocked.")
+      }
+
+      // Handle both compressed (66 chars with 02/03 prefix) and uncompressed (64 chars) formats
+      let cleanedPubkey = ownerPublicKey.toLowerCase().trim()
+      
+      // If it's a compressed pubkey (66 chars), remove the prefix
+      if (cleanedPubkey.length === 66 && (cleanedPubkey.startsWith("02") || cleanedPubkey.startsWith("03"))) {
+        console.log("Detected compressed public key, converting to uncompressed format...")
+        cleanedPubkey = cleanedPubkey.slice(2) // Remove 02/03 prefix
+      }
+
+      if (cleanedPubkey.length !== 64 || !/^[0-9a-f]{64}$/.test(cleanedPubkey)) {
+        throw new Error(`Invalid public key format. Got ${cleanedPubkey.length} chars. Expected 64 hex characters. Value: ${cleanedPubkey}`)
+      }
+
+      ownerPublicKey = cleanedPubkey
+
+      if (!ownerAddress) {
+        throw new Error("Wallet not connected. Please connect your wallet first.")
+      }
+
+      console.log("Owner public key:", ownerPublicKey)
+
+      // Get heir's address and derive public key
+      const heirAddress = formData.nomineeAddress.trim()
+      if (!heirAddress) {
+        throw new Error("Please enter heir's Bitcoin address.")
+      }
+
+      let cleanedHeirPubkey = derivedPubkey
+      
+      if (!cleanedHeirPubkey) {
+        // Try to derive from address if not already derived
+        console.log("Deriving public key from address...")
+        const derived = await derivePublicKeyFromAddress(heirAddress)
+        if (!derived) {
+          throw new Error(
+            "Could not derive public key from address. Make sure the address has sent funds at least once on the blockchain. " +
+            "Alternatively, ask your heir to export their public key directly from their wallet."
+          )
+        }
+        cleanedHeirPubkey = derived
+      }
+
+      const amount = Number.parseFloat(formData.lockedAmount)
+      if (!amount || amount < LEGACY_GUARD_CONFIG.MIN_AMOUNT) {
+        throw new Error(`Amount must be at least ${LEGACY_GUARD_CONFIG.MIN_AMOUNT} BTC.`)
+      }
+
+      if (!formData.inactivityTimeout) {
+        throw new Error("Please select an inactivity timeout.")
+      }
+
+      console.log("Creating vault...")
+
+      // Generate the deployment bundle with spell
+      const bundle = generateDeploymentBundle(
+        ownerPublicKey,
+        cleanedHeirPubkey,
+        heirAddress,
+        amount,
+        formData.inactivityTimeout,
+        undefined,
+        0,
+        "testnet"
+      )
+
+      const spell = (bundle as any).spell || bundle.initSpell
+      if (!bundle.success || !spell) {
+        throw new Error("Failed to generate vault spell. " + (bundle.errors?.join(", ") || ""))
+      }
+
+      // Convert amount to satoshis
+      const satoshis = btcToSatoshis(amount)
+
+      console.log("Requesting transaction signature from wallet...")
+      console.log("Spell template:", spell)
+
+      // Check wallet balance first
+      const balance = await window.unisat.getBalance()
+      console.log("Current balance:", balance)
+      
+      // Estimate fee (1 sat/vbyte * ~200 vbytes = ~200 sats minimum)
+      const estimatedFee = 500 // Conservative estimate in satoshis
+      if (balance.total < satoshis + estimatedFee) {
+        throw new Error(
+          `Insufficient balance. You need at least ${(satoshis + estimatedFee) / 100000000} BTC, but you have ${balance.total / 100000000} BTC.`
+        )
+      }
+
+      // Sign and send transaction with UniSat (UTXO selection is handled automatically)
+      console.log("Signing transaction...")
+      const signedTx = await window.unisat.sendBitcoin(
+        heirAddress,
+        satoshis,
+        {
+          feeRate: 1, // satoshis per vbyte
+        }
+      )
+
+      if (!signedTx) {
+        throw new Error("Transaction signing cancelled by user.")
+      }
+
+      console.log("Transaction signed:", signedTx)
+      setTxId(signedTx)
+
+      // Prepare vault data with actual transaction
+      const timeoutBlocks = LEGACY_GUARD_CONFIG.TIMEOUT_OPTIONS[
+        formData.inactivityTimeout as keyof typeof LEGACY_GUARD_CONFIG.TIMEOUT_OPTIONS
+      ] || 52_000
+
+      const vaultData = {
+        lockedAmount: amount,
+        lockedAmountSatoshis: satoshis,
+        inactivityTimeout: formData.inactivityTimeout,
+        inactivityTimeoutBlocks: timeoutBlocks,
+        nomineeAddress: heirAddress,
+        ownerAddress,
+        ownerPubkey: formatPublicKey(ownerPublicKey),
+        appVerificationKey: LEGACY_GUARD_CONFIG.VERIFICATION_KEY,
+        txId: signedTx,
+        spell,
+        timestamp: new Date().toISOString(),
+      }
+
+      console.log("Vault created successfully:", vaultData)
+      setSuccess(true)
+      onCreateVault(vaultData)
+    } catch (err) {
+      const errorMessage = err instanceof Error ? err.message : "Unknown error occurred"
+      console.error("Vault creation error:", errorMessage)
+      setError(errorMessage)
+    } finally {
+      setLoading(false)
     }
-    
-    onCreateVault(vaultData)
   }
 
   const usdValue = formData.lockedAmount ? (Number.parseFloat(formData.lockedAmount) * 42500).toFixed(2) : "0.00"
@@ -75,6 +234,24 @@ export default function CreateVaultForm({ ownerPubkey, ownerAddress, onCreateVau
 
       <CardContent>
         <form onSubmit={handleSubmit} className="space-y-6">
+          {/* Error Alert */}
+          {error && (
+            <Alert variant="destructive" className="bg-destructive/10 border-destructive/50">
+              <AlertCircle className="h-4 w-4" />
+              <AlertDescription>{error}</AlertDescription>
+            </Alert>
+          )}
+
+          {/* Success Alert */}
+          {success && txId && (
+            <Alert className="bg-green-500/10 border-green-500/50">
+              <CheckCircle className="h-4 w-4 text-green-600" />
+              <AlertDescription className="text-green-600">
+                Vault created! Transaction: <span className="font-mono text-xs">{txId}</span>
+              </AlertDescription>
+            </Alert>
+          )}
+
           {/* Owner Address Display */}
           {ownerAddress && (
             <div className="space-y-2 p-3 bg-input/50 rounded-md border border-border/50">
@@ -85,34 +262,58 @@ export default function CreateVaultForm({ ownerPubkey, ownerAddress, onCreateVau
 
           {/* Nominee Address Field */}
           <div className="space-y-2">
-            <Label htmlFor="nominee" className="text-foreground font-medium">
-              Nominee Address
+            <Label htmlFor="nomineeAddress" className="text-foreground font-medium">
+              Nominee Bitcoin Address
             </Label>
-            <Input
-              id="nominee"
-              placeholder="bc1q..."
-              value={formData.nomineeAddress}
-              onChange={(e) => setFormData({ ...formData, nomineeAddress: e.target.value })}
-              className="font-mono text-sm bg-input border-border text-foreground"
-              required
-            />
-            <p className="text-xs text-muted-foreground">The wallet that will receive funds if you are inactive.</p>
-          </div>
-
-          {/* Nominee Public Key Field */}
-          <div className="space-y-2">
-            <Label htmlFor="nomineePubkey" className="text-foreground font-medium">
-              Nominee Public Key (Hex)
-            </Label>
-            <Input
-              id="nomineePubkey"
-              placeholder="0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20"
-              value={formData.nomineePubkey}
-              onChange={(e) => setFormData({ ...formData, nomineePubkey: e.target.value })}
-              className="font-mono text-xs bg-input border-border text-foreground"
-              required
-            />
-            <p className="text-xs text-muted-foreground">32-byte public key (64 hex characters)</p>
+            <div className="flex gap-2">
+              <Input
+                id="nomineeAddress"
+                placeholder="bc1q... or tb1q..."
+                value={formData.nomineeAddress}
+                onChange={(e) => {
+                  setFormData({ ...formData, nomineeAddress: e.target.value })
+                  setDerivedPubkey(null) // Clear derived pubkey when address changes
+                }}
+                className="font-mono text-sm bg-input border-border text-foreground"
+                required
+              />
+              <Button
+                type="button"
+                onClick={async () => {
+                  if (!formData.nomineeAddress.trim()) {
+                    setError("Please enter an address first")
+                    return
+                  }
+                  setDerivingPubkey(true)
+                  setError(null)
+                  try {
+                    const pubkey = await derivePublicKeyFromAddress(formData.nomineeAddress.trim())
+                    if (pubkey) {
+                      setDerivedPubkey(pubkey)
+                    } else {
+                      setError("Could not derive public key from this address. It may not have sent funds yet.")
+                    }
+                  } catch (err) {
+                    setError("Error deriving public key: " + (err instanceof Error ? err.message : "Unknown error"))
+                  } finally {
+                    setDerivingPubkey(false)
+                  }
+                }}
+                disabled={derivingPubkey || !formData.nomineeAddress.trim()}
+                variant="outline"
+                className="whitespace-nowrap"
+              >
+                {derivingPubkey ? "Deriving..." : "Derive Key"}
+              </Button>
+            </div>
+            {derivedPubkey && (
+              <p className="text-xs text-green-600 font-mono break-all">
+                ✓ Public key derived: {derivedPubkey.slice(0, 16)}...
+              </p>
+            )}
+            <p className="text-xs text-muted-foreground">
+              Enter the address and click "Derive Key" to extract the public key from blockchain data. Address must have sent funds at least once.
+            </p>
           </div>
 
           {/* Inactivity Timeout Field */}
@@ -147,7 +348,7 @@ export default function CreateVaultForm({ ownerPubkey, ownerAddress, onCreateVau
               id="amount"
               type="number"
               placeholder="1.5"
-              step="0.001"
+              step="0.00001"
               min={LEGACY_GUARD_CONFIG.MIN_AMOUNT}
               max={LEGACY_GUARD_CONFIG.MAX_AMOUNT}
               value={formData.lockedAmount}
@@ -163,14 +364,16 @@ export default function CreateVaultForm({ ownerPubkey, ownerAddress, onCreateVau
           {/* Submit Button */}
           <Button
             type="submit"
-            disabled={loading || !formData.nomineeAddress || !formData.lockedAmount || !formData.inactivityTimeout || !formData.nomineePubkey}
-            className="w-full bg-primary text-primary-foreground hover:bg-primary/90 font-semibold text-base h-10 transition-all duration-200"
+            disabled={loading || success || !formData.lockedAmount || !formData.inactivityTimeout || !formData.nomineeAddress || !derivedPubkey}
+            className="w-full bg-primary text-primary-foreground hover:bg-primary/90 font-semibold text-base h-10 transition-all duration-200 disabled:opacity-50"
           >
             {loading ? (
               <span className="flex items-center gap-2">
                 <span className="animate-spin">⟳</span>
-                Generating Zero-Knowledge Proof...
+                {txId ? "Broadcasting Transaction..." : "Signing with Wallet..."}
               </span>
+            ) : success ? (
+              "✓ Vault Created"
             ) : (
               "Enchant UTXO & Lock Funds"
             )}
