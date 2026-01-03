@@ -12,6 +12,12 @@ datasource db {
   provider = "postgresql"
 }
 
+enum VaultStatus {
+  ACTIVE
+  CLAIMABLE
+  CLAIMED
+}
+
 model Vault {
   id                      String    @id @default(cuid())
   txId                    String    @unique // Transaction ID that locked the funds
@@ -27,6 +33,7 @@ model Vault {
   timestamp               DateTime  @default(now())
   createdAt               DateTime  @default(now())
   updatedAt               DateTime  @updatedAt
+  status                  VaultStatus @default(ACTIVE) // Current status of the vault
 
   // Claim tracking
   claimedAt               DateTime? // When the heir claimed the vault
@@ -35,4 +42,5 @@ model Vault {
   @@index([nomineeAddress]) // For quick lookups by heir address
   @@index([ownerAddress])   // For quick lookups by owner address
   @@index([createdAt])      // For sorting by creation date
+  @@index([status])         // For quick lookups by status
 }
