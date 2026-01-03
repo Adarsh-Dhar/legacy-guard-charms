@@ -73,6 +73,28 @@ export default function ClaimVaultPage() {
 		setError(null)
 
 		try {
+			// Step 1: Perform the real blockchain transaction
+			if (typeof window === "undefined" || typeof window.unisat === "undefined") {
+				throw new Error("UniSat wallet not available")
+			}
+
+			// Create a transaction to send the locked amount to the heir
+			const sendAmount = Math.round(parseFloat(vault.lockedAmountSatoshis) || 0)
+			
+			if (sendAmount <= 0) {
+				throw new Error("Invalid amount to claim")
+			}
+
+			// Send transaction using UniSat
+			const txId = await window.unisat.sendBitcoin(address, sendAmount)
+			
+			if (!txId) {
+				throw new Error("Transaction failed or was cancelled")
+			}
+
+			setSuccess(true)
+			
+			// Step 2: After transaction is sent, update the vault status in database
 			const response = await fetch(`/api/vaults/${vaultId}/claim`, {
 				method: "POST",
 				headers: {
@@ -80,13 +102,12 @@ export default function ClaimVaultPage() {
 				},
 				body: JSON.stringify({
 					heirAddress: address,
-					claimTxId: `claim-${Date.now()}`, // Placeholder - should be actual tx ID from blockchain
+					claimTxId: txId, // Use the actual blockchain transaction ID
 				}),
 			})
 
 			if (response.ok) {
 				const data = await response.json()
-				setSuccess(true)
 				setVault(data.vault)
 				// Redirect back to vaults page after 2 seconds
 				setTimeout(() => {
@@ -94,10 +115,12 @@ export default function ClaimVaultPage() {
 				}, 2000)
 			} else {
 				const errorData = await response.json()
-				setError(errorData.error || "Failed to claim vault")
+				throw new Error(errorData.error || "Failed to update vault status")
 			}
 		} catch (err) {
-			setError("Error claiming vault")
+			const errorMessage = err instanceof Error ? err.message : "Error claiming vault"
+			setError(errorMessage)
+			setSuccess(false)
 			console.error(err)
 		} finally {
 			setClaiming(false)
@@ -235,13 +258,13 @@ export default function ClaimVaultPage() {
 					</div>
 
 					<div className="bg-blue-50 dark:bg-blue-900/20 border border-blue-200 dark:border-blue-800 rounded-lg p-4">
-						<h3 className="font-semibold text-blue-900 dark:text-blue-200 mb-2">How to Claim</h3>
+						<h3 className="font-semibold text-blue-900 dark:text-blue-200 mb-2">Claim Process</h3>
 						<ol className="text-sm text-blue-800 dark:text-blue-300 space-y-1 list-decimal list-inside">
 							<li>Verify you have access to the heir wallet address</li>
-							<li>Ensure you have the spell for this vault available</li>
-							<li>Click "Claim Now" to initiate the claim transaction on the blockchain</li>
-							<li>Sign the transaction with your wallet</li>
-							<li>Wait for the transaction to be confirmed</li>
+							<li>Click "Claim Now" to initiate a real Bitcoin transaction</li>
+							<li>UniSat will prompt you to sign the transaction</li>
+							<li>The locked funds ({vault.lockedAmount} BTC) will be sent to your wallet</li>
+							<li>Once the blockchain confirms the transaction, the vault status updates to CLAIMED</li>
 						</ol>
 					</div>
 

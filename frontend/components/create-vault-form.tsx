@@ -55,6 +55,24 @@ export default function CreateVaultForm({ ownerPubkey, ownerAddress, onCreateVau
   const [derivingPubkey, setDerivingPubkey] = useState(false)
   const [derivedPubkey, setDerivedPubkey] = useState<string | null>(null)
 
+  const normalizePubkey = (raw: string): string => {
+    if (!raw) throw new Error("Public key missing")
+    let key = raw.toLowerCase().trim()
+    if (key.startsWith("0x")) key = key.slice(2)
+    // Compressed (02/03 + 32 bytes) -> drop prefix
+    if ((key.startsWith("02") || key.startsWith("03")) && key.length === 66) {
+      key = key.slice(2)
+    }
+    // Uncompressed (04 + 64 bytes for x + 64 bytes for y) -> take x coordinate
+    if (key.startsWith("04") && key.length === 130) {
+      key = key.slice(2, 66)
+    }
+    if (key.length !== 64 || !/^[0-9a-f]{64}$/.test(key)) {
+      throw new Error(`Invalid public key format. Got ${key.length} chars. Expected 64 hex characters.`)
+    }
+    return key
+  }
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()
     setError(null)
@@ -79,20 +97,7 @@ export default function CreateVaultForm({ ownerPubkey, ownerAddress, onCreateVau
         throw new Error("Failed to get public key from wallet. Make sure UniSat is connected and unlocked.")
       }
 
-      // Handle both compressed (66 chars with 02/03 prefix) and uncompressed (64 chars) formats
-      let cleanedPubkey = ownerPublicKey.toLowerCase().trim()
-      
-      // If it's a compressed pubkey (66 chars), remove the prefix
-      if (cleanedPubkey.length === 66 && (cleanedPubkey.startsWith("02") || cleanedPubkey.startsWith("03"))) {
-        console.log("Detected compressed public key, converting to uncompressed format...")
-        cleanedPubkey = cleanedPubkey.slice(2) // Remove 02/03 prefix
-      }
-
-      if (cleanedPubkey.length !== 64 || !/^[0-9a-f]{64}$/.test(cleanedPubkey)) {
-        throw new Error(`Invalid public key format. Got ${cleanedPubkey.length} chars. Expected 64 hex characters. Value: ${cleanedPubkey}`)
-      }
-
-      ownerPublicKey = cleanedPubkey
+      ownerPublicKey = normalizePubkey(ownerPublicKey)
 
       if (!ownerAddress) {
         throw new Error("Wallet not connected. Please connect your wallet first.")
@@ -107,7 +112,7 @@ export default function CreateVaultForm({ ownerPubkey, ownerAddress, onCreateVau
       }
 
       let cleanedHeirPubkey = derivedPubkey
-      
+
       if (!cleanedHeirPubkey) {
         // Try to derive from address if not already derived
         console.log("Deriving public key from address...")
@@ -120,6 +125,9 @@ export default function CreateVaultForm({ ownerPubkey, ownerAddress, onCreateVau
         }
         cleanedHeirPubkey = derived
       }
+
+      cleanedHeirPubkey = normalizePubkey(cleanedHeirPubkey)
+      setDerivedPubkey(cleanedHeirPubkey)
 
       const amount = Number.parseFloat(formData.lockedAmount)
       if (!amount || amount < LEGACY_GUARD_CONFIG.MIN_AMOUNT) {
@@ -155,27 +163,112 @@ export default function CreateVaultForm({ ownerPubkey, ownerAddress, onCreateVau
       console.log("Requesting transaction signature from wallet...")
       console.log("Spell template:", spell)
 
-      // Check wallet balance first
+      // Check wallet balance and UTXOs
       const balance = await window.unisat.getBalance()
       console.log("Current balance:", balance)
       
-      // Estimate fee (1 sat/vbyte * ~200 vbytes = ~200 sats minimum)
-      const estimatedFee = 500 // Conservative estimate in satoshis
-      if (balance.total < satoshis + estimatedFee) {
+      // Try to get UTXOs from wallet
+      let utxos = []
+      try {
+        // Some UniSat versions expose getBitcoinUtxos
+        if (typeof window.unisat.getBitcoinUtxos === 'function') {
+          utxos = await window.unisat.getBitcoinUtxos()
+          console.log("Available UTXOs:", utxos)
+          console.log("UTXO details:", utxos.map((u: any) => ({
+            txid: u.txid,
+            vout: u.vout,
+            value: u.satoshis,
+            confirmed: u.height > 0
+          })))
+        }
+      } catch (utxoError) {
+        console.warn("Could not fetch UTXOs:", utxoError)
+      }
+      
+      // Warn if UTXOs might be stale
+      if (utxos.length > 0) {
+        const unconfirmedUtxos = utxos.filter((u: any) => !u.height || u.height === -1)
+        if (unconfirmedUtxos.length > 0) {
+          console.warn(`Warning: ${unconfirmedUtxos.length} of ${utxos.length} UTXOs are unconfirmed`)
+        }
+      }
+      
+      // Check if we have usable UTXOs
+      if (balance.confirmed === 0) {
         throw new Error(
-          `Insufficient balance. You need at least ${(satoshis + estimatedFee) / 100000000} BTC, but you have ${balance.total / 100000000} BTC.`
+          "No confirmed balance available. Please wait for your transactions to confirm before creating a vault. " +
+          "If you just received funds, they need at least 1 confirmation."
+        )
+      }
+      
+      if (utxos.length === 0 && balance.confirmed > 0) {
+        console.warn("No UTXOs available but balance shows confirmed funds - wallet might be syncing")
+      }
+      
+      // Estimate fee (2 sat/vbyte * ~200 vbytes = ~400 sats minimum)
+      const estimatedFee = 600 // Conservative estimate in satoshis
+      if (balance.confirmed < satoshis + estimatedFee) {
+        throw new Error(
+          `Insufficient confirmed balance. You need at least ${(satoshis + estimatedFee) / 100000000} BTC, ` +
+          `but you have ${balance.confirmed / 100000000} BTC confirmed ` +
+          `(${balance.unconfirmed / 100000000} BTC unconfirmed). ` +
+          `Please wait for confirmations or add more funds.`
         )
       }
 
       // Sign and send transaction with UniSat (UTXO selection is handled automatically)
       console.log("Signing transaction...")
-      const signedTx = await window.unisat.sendBitcoin(
-        heirAddress,
-        satoshis,
-        {
-          feeRate: 1, // satoshis per vbyte
+      console.log("Sending", satoshis, "sats to", heirAddress)
+      let signedTx
+      
+      try {
+        signedTx = await window.unisat.sendBitcoin(
+          heirAddress,
+          satoshis,
+          {
+            feeRate: 2, // Increase fee rate to 2 sat/vbyte for better propagation
+          }
+        )
+      } catch (walletError: any) {
+        console.error("UniSat wallet error:", walletError)
+        console.error("Error type:", typeof walletError)
+        console.error("Error stringified:", JSON.stringify(walletError, null, 2))
+        
+        // Extract error details
+        const errorCode = walletError?.code
+        const errorMessage = walletError?.message || walletError?.error || String(walletError)
+        const errorData = walletError?.data
+        
+        console.error("Parsed error:", { errorCode, errorMessage, errorData })
+        
+        // Handle empty error (user cancelled)
+        if (!errorCode && !errorMessage && Object.keys(walletError || {}).length === 0) {
+          throw new Error('Transaction was cancelled or rejected by wallet.')
         }
-      )
+        
+        if (errorCode === -32603 || errorMessage.includes('bad-txns-inputs-missingorspent')) {
+          throw new Error(
+            'UTXO Error: Your wallet UTXOs are stale or already spent. ' +
+            'This happens when previous transactions are still pending or the wallet cache is outdated. ' +
+            '\n\nSolutions:\n' +
+            '1. Wait 10-15 minutes for pending transactions to confirm\n' +
+            '2. Get fresh testnet coins from: https://testnet-faucet.mempool.co/\n' +
+            '3. Close and restart UniSat wallet to refresh UTXO state'
+          )
+        }
+        
+        if (errorMessage.includes('Insufficient') || errorMessage.includes('balance')) {
+          throw new Error(
+            `Insufficient balance for transaction. You need ${(satoshis + 600) / 100000000} BTC but may not have enough available UTXOs.`
+          )
+        }
+        
+        throw new Error(
+          `Wallet transaction failed${errorCode ? ` (${errorCode})` : ''}: ${errorMessage || 'Unknown error'}. ` +
+          `Note: Standard UniSat doesn't support Charms protocol. ` +
+          `For production, use BitcoinOS SDK or Charms-compatible wallet.`
+        )
+      }
 
       if (!signedTx) {
         throw new Error("Transaction signing cancelled by user.")
@@ -229,8 +322,13 @@ export default function CreateVaultForm({ ownerPubkey, ownerAddress, onCreateVau
       setSuccess(true)
       onCreateVault(vaultData)
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : "Unknown error occurred"
-      console.error("Vault creation error:", errorMessage)
+      const errorMessage = err instanceof Error ? err.message : JSON.stringify(err)
+      console.error("Vault creation error:", err)
+      console.error("Error details:", { 
+        message: errorMessage, 
+        type: err instanceof Error ? err.constructor.name : typeof err,
+        stack: err instanceof Error ? err.stack : undefined
+      })
       setError(errorMessage)
     } finally {
       setLoading(false)

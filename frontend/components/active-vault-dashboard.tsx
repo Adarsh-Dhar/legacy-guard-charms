@@ -37,6 +37,9 @@ export default function ActiveVaultDashboard({ vaultData, onExitVault }: ActiveV
 
   // Initialize countdown
   useEffect(() => {
+    // Stop spinning up new timers once expired
+    if (vaultExpired) return
+
     const totalDays = TIMEOUT_DAYS[vaultData.inactivityTimeout as keyof typeof TIMEOUT_DAYS]
     let remainingSeconds = totalDays * 24 * 60 * 60
 
