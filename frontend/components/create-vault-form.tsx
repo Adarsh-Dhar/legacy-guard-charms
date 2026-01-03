@@ -217,64 +217,104 @@ export default function CreateVaultForm({ ownerPubkey, ownerAddress, onCreateVau
       }
 
       // Sign and send transaction with UniSat (UTXO selection is handled automatically)
-      console.log("Signing transaction...")
-      console.log("Sending", satoshis, "sats to", heirAddress)
-      let signedTx
+      // CRITICAL: We CANNOT use window.unisat.sendBitcoin() because it creates
+      // a standard Bitcoin transaction that sends funds directly to the heir.
+      // We need to create an ENCHANTED UTXO controlled by the Charms contract.
       
+      console.log("Generating Charms spell for vault creation...")
+      console.log("This will create an enchanted UTXO, NOT a direct transfer to heir")
+      
+      // Get user's UTXOs for spending
+      let utxos = []
       try {
-        signedTx = await window.unisat.sendBitcoin(
-          heirAddress,
-          satoshis,
-          {
-            feeRate: 2, // Increase fee rate to 2 sat/vbyte for better propagation
-          }
-        )
-      } catch (walletError: any) {
-        console.error("UniSat wallet error:", walletError)
-        console.error("Error type:", typeof walletError)
-        console.error("Error stringified:", JSON.stringify(walletError, null, 2))
-        
-        // Extract error details
-        const errorCode = walletError?.code
-        const errorMessage = walletError?.message || walletError?.error || String(walletError)
-        const errorData = walletError?.data
-        
-        console.error("Parsed error:", { errorCode, errorMessage, errorData })
-        
-        // Handle empty error (user cancelled)
-        if (!errorCode && !errorMessage && Object.keys(walletError || {}).length === 0) {
-          throw new Error('Transaction was cancelled or rejected by wallet.')
-        }
-        
-        if (errorCode === -32603 || errorMessage.includes('bad-txns-inputs-missingorspent')) {
-          throw new Error(
-            'UTXO Error: Your wallet UTXOs are stale or already spent. ' +
-            'This happens when previous transactions are still pending or the wallet cache is outdated. ' +
-            '\n\nSolutions:\n' +
-            '1. Wait 10-15 minutes for pending transactions to confirm\n' +
-            '2. Get fresh testnet coins from: https://testnet-faucet.mempool.co/\n' +
-            '3. Close and restart UniSat wallet to refresh UTXO state'
-          )
-        }
-        
-        if (errorMessage.includes('Insufficient') || errorMessage.includes('balance')) {
-          throw new Error(
-            `Insufficient balance for transaction. You need ${(satoshis + 600) / 100000000} BTC but may not have enough available UTXOs.`
-          )
-        }
-        
+        utxos = await window.unisat.getBitcoinUtxos()
+        console.log("Available UTXOs:", utxos)
+      } catch (utxoError) {
         throw new Error(
-          `Wallet transaction failed${errorCode ? ` (${errorCode})` : ''}: ${errorMessage || 'Unknown error'}. ` +
-          `Note: Standard UniSat doesn't support Charms protocol. ` +
-          `For production, use BitcoinOS SDK or Charms-compatible wallet.`
+          "Could not fetch UTXOs from wallet. Please ensure UniSat wallet is unlocked and connected."
         )
       }
-
-      if (!signedTx) {
-        throw new Error("Transaction signing cancelled by user.")
+      
+      if (utxos.length === 0) {
+        throw new Error(
+          "No UTXOs available. Please ensure your wallet has confirmed funds."
+        )
       }
-
-      console.log("Transaction signed:", signedTx)
+      
+      // Select a suitable UTXO (for now, just use the first one with enough funds)
+      const selectedUtxo = utxos.find((u: any) => u.satoshis >= satoshis + 1000) // +1000 for fee
+      if (!selectedUtxo) {
+        throw new Error(
+          `No UTXO large enough for this transaction. Need at least ${(satoshis + 1000) / 100000000} BTC in a single UTXO.`
+        )
+      }
+      
+      console.log("Selected UTXO:", selectedUtxo)
+      
+      // Call backend API to generate the proper Charms spell
+      console.log("Calling backend API to generate enchanted UTXO spell...")
+      const spellResponse = await fetch('/api/vault/create', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ownerPubkey: formatPublicKey(ownerPublicKey),
+          heirPubkey: cleanedHeirPubkey,
+          heirAddress: heirAddress,
+          amount: satoshis,
+          timeoutBlocks: formData.inactivityTimeout 
+            ? LEGACY_GUARD_CONFIG.TIMEOUT_OPTIONS[formData.inactivityTimeout as keyof typeof LEGACY_GUARD_CONFIG.TIMEOUT_OPTIONS]
+            : 52000,
+          inputUtxo: `${selectedUtxo.txid}:${selectedUtxo.vout}`
+        })
+      })
+      
+      if (!spellResponse.ok) {
+        const errorData = await spellResponse.json()
+        throw new Error(
+          `Failed to generate vault spell: ${errorData.error || 'Unknown error'}. ` +
+          `Details: ${errorData.details || 'None'}`
+        )
+      }
+      
+      const spellData = await spellResponse.json()
+      console.log("Spell generated:", spellData)
+      
+      // For now, since Charms CLI integration is not available in browser,
+      // we provide the spell for manual execution
+      if (!spellData.validation?.valid) {
+        throw new Error(
+          'IMPORTANT: UniSat wallet cannot create Charms enchanted UTXOs.\n\n' +
+          'The spell has been generated below. To create the vault:\n\n' +
+          '1. Save the spell to a file (e.g., initialize.yaml)\n' +
+          '2. Navigate to contract/legacy-guard directory\n' +
+          '3. Run: charms spell check --app-bins=$(charms app build) --mock < initialize.yaml\n' +
+          '4. Run: charms spell prove < initialize.yaml\n' +
+          '5. Sign and broadcast the resulting transaction\n\n' +
+          `Spell:\n${spellData.spell}`
+        )
+      }
+      
+      // If we reach here, the backend validated the spell but cannot prove it yet
+      // Store the spell for manual execution
+      const signedTx = null // We don't have a signed transaction yet
+      console.log("Spell validation successful. Manual execution required:")
+      // If we reach here, the backend validated the spell but cannot prove it yet
+      // Store the spell for manual execution
+      const signedTx = null // We don't have a signed transaction yet
+      console.log("Spell validation successful. Manual execution required:")
+      console.log(spellData.spell)
+      console.log("\nNext steps:", spellData.nextSteps)
+      
+      // For now, show the spell to the user for manual execution
+      setError(
+        'Vault spell generated successfully!\n\n' +
+        'IMPORTANT: This requires Charms CLI to complete. The spell creates an ENCHANTED UTXO that stores funds in the contract (not a direct transfer to heir).\n\n' +
+        'To complete vault creation:\n' +
+        spellData.nextSteps.join('\n') + '\n\n' +
+        `Generated Spell (save as initialize.yaml):\n\`\`\`yaml\n${spellData.spell}\n\`\`\``
+      )
+      return // Don't proceed with the rest of the flow
+      
       setTxId(signedTx)
 
       // Prepare vault data with actual transaction

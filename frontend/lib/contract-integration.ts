@@ -132,18 +132,9 @@ function generateInitializeSpellTemplate(config: VaultDeploymentConfig): string 
     "",
     "inputs:",
     '  - utxo: "<UTXO_ID>:<UTXO_INDEX>"',
-    `    amount: ${satoshis}`,
-    "    charms:",
-    `      - app: "c78f9360ba4bc547be980aeb7c55e799184b8a6171d267cc53e1a427cdef7337"`,
-    "        data:",
-    "          action: Initialize",
-    `          owner_pubkey: "${ownerKey}"`,
-    `          heir_pubkey: "${heirKey}"`,
-    `          timeout_blocks: ${config.timeoutBlocks}`,
     "",
     "outputs:",
-    `  - address: "${config.heirAddress}"`,
-    `    value: ${satoshis}`,
+    `  - value: ${satoshis}`,
     "    charms:",
     `      - app: "c78f9360ba4bc547be980aeb7c55e799184b8a6171d267cc53e1a427cdef7337"`,
     "        data:",
@@ -151,6 +142,7 @@ function generateInitializeSpellTemplate(config: VaultDeploymentConfig): string 
     `          owner_pubkey: "${ownerKey}"`,
     `          heir_pubkey: "${heirKey}"`,
     `          timeout_blocks: ${config.timeoutBlocks}`,
+    "    # NOTE: No 'address' field - creates Taproot address controlled by contract",
   ];
 
   return lines.join("\n");

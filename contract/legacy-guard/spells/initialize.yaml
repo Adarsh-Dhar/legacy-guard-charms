@@ -1,0 +1,26 @@
+# Initialize Spell - Creates a new vault with funds locked in the contract
+# This creates an enchanted UTXO controlled by the contract's verification key
+
+version: 8
+
+# Define the Charms app
+apps:
+  $00: n/${app_id}/${app_vk}
+
+# Provide the UTXO to spend
+private_inputs:
+  $00: "${in_utxo}"
+
+# Input: Standard Bitcoin UTXO being spent
+ins:
+  - utxo_id: ${in_utxo}
+    charms: {}
+
+# Output: Enchanted UTXO with vault state (funds STORED in contract)
+outs:
+  - charms:
+      $00:
+        action: Initialize
+        owner_pubkey: ${owner_pubkey}
+        heir_pubkey: ${heir_pubkey}
+        timeout_blocks: ${timeout_blocks}
